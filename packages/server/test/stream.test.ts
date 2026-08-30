@@ -72,12 +72,47 @@ describe('text stream (trace-05)', () => {
     const final = chunks.at(-1)
     expect(final?.choices[0]?.finish_reason).toBe('stop')
     expect(final?.usage).toEqual({
-      prompt_tokens: 2,
+      prompt_tokens: 154827,
       completion_tokens: 87,
-      total_tokens: 89,
-      prompt_tokens_details: { cache_read_tokens: 0 },
+      total_tokens: 154914,
+      prompt_tokens_details: { cached_tokens: 0 },
       completion_tokens_details: { reasoning_tokens: 0 },
     })
+  })
+
+  test('downstream cancellation cancels the upstream reader', async () => {
+    const encoder = new TextEncoder()
+    let cancelledWith: unknown
+    let resolveCancelled: (() => void) | undefined
+    const cancelled = new Promise<void>((resolve) => {
+      resolveCancelled = resolve
+    })
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: message_start\n' +
+              'data: {"type":"message_start","message":{"id":"msg_cancel","model":"claude-opus-5"}}\n\n',
+          ),
+        )
+      },
+      cancel(reason) {
+        cancelledWith = reason
+        resolveCancelled?.()
+      },
+    })
+
+    const reader = translateToOpenAISSE(upstream).getReader()
+    const first = await reader.read()
+    expect(first.done).toBe(false)
+    await reader.cancel('client disconnected')
+    await Promise.race([
+      cancelled,
+      Bun.sleep(250).then(() => {
+        throw new Error('upstream cancellation timed out')
+      }),
+    ])
+    expect(cancelledWith).toBe('client disconnected')
   })
 
   test('translateToOpenAISSE emits a well-formed SSE stream ending in [DONE]', async () => {

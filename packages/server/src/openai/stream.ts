@@ -51,10 +51,16 @@ export type AnthropicEvent =
 
 async function* bodyLines(
   body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  const cancelReader = () => {
+    void reader.cancel(signal?.reason).catch(() => {})
+  }
+  if (signal?.aborted) cancelReader()
+  else signal?.addEventListener('abort', cancelReader, { once: true })
   try {
     for (;;) {
       const { done, value } = await reader.read()
@@ -69,6 +75,7 @@ async function* bodyLines(
     }
     if (buffer) yield buffer
   } finally {
+    signal?.removeEventListener('abort', cancelReader)
     reader.releaseLock()
   }
 }
@@ -80,9 +87,10 @@ async function* bodyLines(
  */
 export async function* parseAnthropicSSE(
   body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
 ): AsyncGenerator<AnthropicEvent> {
   let data = ''
-  for await (const rawLine of bodyLines(body)) {
+  for await (const rawLine of bodyLines(body, signal)) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
     if (!line.trim()) {
       if (data) {
@@ -330,12 +338,16 @@ export function translateToOpenAISSE(
   upstream: ReadableStream<Uint8Array>,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
-  const events = parseAnthropicSSE(upstream)
+  const abortController = new AbortController()
+  const events = parseAnthropicSSE(upstream, abortController.signal)
   const state = new StreamState()
+  let cancelled = false
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (value: string) => controller.enqueue(encoder.encode(value))
+      const send = (value: string) => {
+        if (!cancelled) controller.enqueue(encoder.encode(value))
+      }
       try {
         for await (const event of events) {
           if (event.type === 'error') {
@@ -347,17 +359,23 @@ export function translateToOpenAISSE(
         }
         send('data: [DONE]\n\n')
       } catch (error) {
-        send(
-          `data: ${JSON.stringify({
-            error: {
-              message: error instanceof Error ? error.message : String(error),
-              type: 'server_error',
-            },
-          })}\n\n`,
-        )
+        if (!cancelled) {
+          send(
+            `data: ${JSON.stringify({
+              error: {
+                message: error instanceof Error ? error.message : String(error),
+                type: 'server_error',
+              },
+            })}\n\n`,
+          )
+        }
       } finally {
-        controller.close()
+        if (!cancelled) controller.close()
       }
+    },
+    cancel(reason) {
+      cancelled = true
+      abortController.abort(reason)
     },
   })
 }

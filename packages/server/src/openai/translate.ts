@@ -161,6 +161,7 @@ function translateMessages(messages: ChatMessage[]): {
   const out: AnthropicMessage[] = []
 
   let seenNonSystem = false
+  let midSystemSectionOpen = false
   let pendingToolResults: AnthropicToolResultBlock[] | null = null
 
   const flushToolResults = () => {
@@ -171,12 +172,22 @@ function translateMessages(messages: ChatMessage[]): {
   }
 
   for (const message of messages) {
-    if (message.role === 'system') {
+    const role: unknown = (message as { role?: unknown } | null)?.role
+    if (!['system', 'user', 'assistant', 'tool'].includes(String(role))) {
+      throw new BadRequestError(`unsupported message role: ${String(role)}`)
+    }
+
+    if (role === 'system') {
       flushToolResults()
       const text = textOf(message)
       if (!seenNonSystem) {
         systemParts.push(text)
       } else {
+        if (!midSystemSectionOpen && out.at(-1)?.role !== 'user') {
+          throw new BadRequestError(
+            'mid-conversation system messages must immediately follow a user turn',
+          )
+        }
         // Mid-conversation system messages ride the
         // mid-conversation-system-2026-04-07 beta (observed in the trace).
         out.push({
@@ -189,13 +200,23 @@ function translateMessages(messages: ChatMessage[]): {
             },
           ],
         })
+        midSystemSectionOpen = true
       }
       continue
     }
 
     seenNonSystem = true
 
-    if (message.role === 'tool') {
+    if (midSystemSectionOpen) {
+      if (role !== 'assistant') {
+        throw new BadRequestError(
+          'mid-conversation system messages must be final or immediately followed by an assistant turn',
+        )
+      }
+      midSystemSectionOpen = false
+    }
+
+    if (role === 'tool') {
       if (!message.tool_call_id) {
         throw new BadRequestError('tool messages must include tool_call_id')
       }
@@ -215,7 +236,7 @@ function translateMessages(messages: ChatMessage[]): {
 
     flushToolResults()
 
-    if (message.role === 'user') {
+    if (role === 'user') {
       out.push({ role: 'user', content: userContentBlocks(message) })
       continue
     }
@@ -343,12 +364,19 @@ export function toAnthropicBody(
 export function mapUsage(
   usage: AnthropicUsage | undefined,
 ): ChatCompletionUsage {
+  const uncachedInputTokens = usage?.input_tokens ?? 0
+  const cacheCreationTokens = usage?.cache_creation_input_tokens ?? 0
+  const cacheReadTokens = usage?.cache_read_input_tokens ?? 0
+  const promptTokens =
+    uncachedInputTokens + cacheCreationTokens + cacheReadTokens
+  const completionTokens = usage?.output_tokens ?? 0
+
   return {
-    prompt_tokens: usage?.input_tokens ?? 0,
-    completion_tokens: usage?.output_tokens ?? 0,
-    total_tokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
     prompt_tokens_details: {
-      cache_read_tokens: usage?.cache_read_input_tokens ?? 0,
+      cached_tokens: cacheReadTokens,
     },
     completion_tokens_details: {
       reasoning_tokens: usage?.output_tokens_details?.thinking_tokens ?? 0,

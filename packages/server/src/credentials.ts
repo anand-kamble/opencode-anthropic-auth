@@ -10,6 +10,19 @@ export const DEFAULT_CREDENTIALS_PATH = join(
   'auth.json',
 )
 
+export const REFRESH_TIMEOUT_MS = 10_000
+
+type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>
+
+export type CredentialStoreOptions = {
+  fetchFn?: FetchLike
+  refreshTimeoutMs?: number
+  sleep?: (delayMs: number) => Promise<void>
+}
+
 export type Credentials = {
   access: string
   refresh: string
@@ -55,7 +68,10 @@ export class CredentialStore {
   private cached: Credentials | null = null
   private refreshPromise: Promise<string> | null = null
 
-  constructor(private path: string) {}
+  constructor(
+    private path: string,
+    private options: CredentialStoreOptions = {},
+  ) {}
 
   async load(): Promise<Credentials | null> {
     this.cached = await loadCredentials(this.path)
@@ -107,14 +123,18 @@ export class CredentialStore {
       try {
         if (attempt > 0) {
           const delay = baseDelayMs * 2 ** (attempt - 1)
-          await new Promise((resolve) => setTimeout(resolve, delay))
+          await (
+            this.options.sleep ??
+            ((delayMs) =>
+              new Promise((resolve) => setTimeout(resolve, delayMs)))
+          )(delay)
         }
 
         // Re-read from disk to get the latest refresh token — it may have
         // been rotated by another process since we cached it.
         const latest = (await this.load()) as Credentials
 
-        const response = await fetch(TOKEN_URL, {
+        const response = await (this.options.fetchFn ?? fetch)(TOKEN_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -126,6 +146,9 @@ export class CredentialStore {
             refresh_token: latest.refresh,
             client_id: CLIENT_ID,
           }),
+          signal: AbortSignal.timeout(
+            this.options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS,
+          ),
         })
 
         if (!response.ok) {
@@ -155,7 +178,8 @@ export class CredentialStore {
       } catch (error) {
         const isNetworkError =
           error instanceof Error &&
-          (error.message.includes('fetch failed') ||
+          (error.name === 'TimeoutError' ||
+            error.message.includes('fetch failed') ||
             ('code' in error &&
               (error.code === 'ECONNRESET' ||
                 error.code === 'ECONNREFUSED' ||

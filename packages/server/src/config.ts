@@ -22,7 +22,7 @@ export const DEFAULT_CLAUDE_MODELS = [
 export type ServerConfig = {
   port: number
   host: string
-  /** null → generate a random key and print it once at startup */
+  /** null is allowed only for the login subcommand. */
   apiKey: string | null
   anthropicBaseUrl: string
   credentialsPath: string
@@ -34,6 +34,11 @@ export type ServerConfig = {
   effort: ClaudeEffort
 }
 
+export type LoadConfigOptions = {
+  /** The login subcommand does not open a server and therefore needs no key. */
+  requireApiKey?: boolean
+}
+
 function parseModelList(value: string | undefined): string[] | null {
   if (value === undefined) return null
   const models = value
@@ -43,22 +48,64 @@ function parseModelList(value: string | undefined): string[] | null {
   return models.length ? models : null
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  )
+}
+
+export function normalizeAnthropicBaseUrl(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('ANTHROPIC_BASE_URL must be a valid URL')
+  }
+
+  if (url.username || url.password) {
+    throw new Error('ANTHROPIC_BASE_URL must not contain credentials')
+  }
+  if (url.search || url.hash) {
+    throw new Error('ANTHROPIC_BASE_URL must not contain a query or fragment')
+  }
+
+  const secure = url.protocol === 'https:'
+  const loopbackDebugProxy =
+    url.protocol === 'http:' && isLoopbackHostname(url.hostname)
+  if (!secure && !loopbackDebugProxy) {
+    throw new Error(
+      'ANTHROPIC_BASE_URL must use HTTPS (plaintext HTTP is allowed only for localhost or IP loopback debug proxies)',
+    )
+  }
+
+  return url.href.replace(/\/$/, '')
+}
+
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
+  options: LoadConfigOptions = {},
 ): ServerConfig {
   const modelAllowlist = parseModelList(env.CLAUDE_MODELS)
   const effort = env.CC_EFFORT ?? 'high'
   if (!isClaudeEffort(effort)) {
     throw new Error(`CC_EFFORT must be one of: ${CLAUDE_EFFORT_DESCRIPTION}`)
   }
+  const apiKey = env.SERVER_API_KEY?.trim() || null
+  if ((options.requireApiKey ?? true) && !apiKey) {
+    throw new Error(
+      'SERVER_API_KEY is required when starting the server; set it to a strong local bearer secret',
+    )
+  }
 
   return {
     port: Number(env.PORT ?? 8080),
     host: '127.0.0.1',
-    apiKey: env.SERVER_API_KEY || null,
-    anthropicBaseUrl: (
-      env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com'
-    ).replace(/\/$/, ''),
+    apiKey,
+    anthropicBaseUrl: normalizeAnthropicBaseUrl(
+      env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com',
+    ),
     credentialsPath: env.CREDENTIALS_PATH ?? DEFAULT_CREDENTIALS_PATH,
     fallbackModels: modelAllowlist ?? [...DEFAULT_CLAUDE_MODELS],
     modelAllowlist,

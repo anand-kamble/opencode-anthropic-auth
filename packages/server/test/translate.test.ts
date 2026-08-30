@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { loadConfig } from '../src/config.ts'
-import { toAnthropicBody } from '../src/openai/translate.ts'
+import { mapUsage, toAnthropicBody } from '../src/openai/translate.ts'
 import {
   BadRequestError,
   type ChatCompletionRequest,
 } from '../src/openai/types.ts'
 
 const ctx = {
-  config: loadConfig({}),
+  config: loadConfig({ SERVER_API_KEY: 'test-local-key' }),
   deviceId: 'dev'.repeat(16),
   accountUuid: '00000000-0000-0000-0000-000000000000',
   sessionId: '11111111-2222-3333-4444-555555555555',
@@ -68,13 +68,13 @@ describe('system prompt', () => {
     expect(body.system[2]!.text).toBe('Part one.\n\nPart two.')
   })
 
-  test('mid-conversation system message stays a message', () => {
+  test('valid mid-conversation system message stays a message', () => {
     const body = translate({
       messages: [
         { role: 'system', content: 'global' },
         { role: 'user', content: 'hi' },
         { role: 'system', content: 'mid-turn reminder' },
-        { role: 'user', content: 'again' },
+        { role: 'assistant', content: 'understood' },
       ],
     })
     expect(body.system[2]!.text).toBe('global')
@@ -89,6 +89,51 @@ describe('system prompt', () => {
         },
       ],
     })
+    expect(body.messages[2]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'understood' }],
+    })
+  })
+
+  test('mid-conversation system messages may be final or consecutive', () => {
+    const final = translate({
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'system', content: 'first reminder' },
+        { role: 'system', content: 'second reminder' },
+      ],
+    })
+    expect(final.messages.map((message) => message.role)).toEqual([
+      'user',
+      'system',
+      'system',
+    ])
+  })
+
+  test('rejects invalid mid-conversation system ordering', () => {
+    expect(() =>
+      translate({
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'system', content: 'reminder' },
+          { role: 'user', content: 'invalid follower' },
+        ],
+      }),
+    ).toThrow(
+      'mid-conversation system messages must be final or immediately followed by an assistant turn',
+    )
+
+    expect(() =>
+      translate({
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: 'reply' },
+          { role: 'system', content: 'invalid placement' },
+        ],
+      }),
+    ).toThrow(
+      'mid-conversation system messages must immediately follow a user turn',
+    )
   })
 
   test('no system message → billing + identity only', () => {
@@ -246,6 +291,19 @@ describe('messages', () => {
       }),
     ).toThrow(BadRequestError)
   })
+
+  test('unsupported message roles are a 400', () => {
+    expect(() =>
+      translate({
+        messages: [
+          { role: 'developer', content: 'nope' } as unknown as {
+            role: 'system'
+            content: string
+          },
+        ],
+      }),
+    ).toThrow('unsupported message role: developer')
+  })
 })
 
 describe('tools and sampling params', () => {
@@ -345,7 +403,10 @@ describe('traced defaults and validation', () => {
   test('an explicit model allowlist is enforced', () => {
     const restricted = {
       ...ctx,
-      config: loadConfig({ CLAUDE_MODELS: 'claude-opus-5' }),
+      config: loadConfig({
+        SERVER_API_KEY: 'test-local-key',
+        CLAUDE_MODELS: 'claude-opus-5',
+      }),
     }
     expect(() =>
       toAnthropicBody(
@@ -392,5 +453,23 @@ describe('traced defaults and validation', () => {
 
   test('empty messages are a 400', () => {
     expect(() => translate({ messages: [] })).toThrow(BadRequestError)
+  })
+
+  test('usage includes cache creation and cache reads in prompt totals', () => {
+    expect(
+      mapUsage({
+        input_tokens: 2,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 5,
+        output_tokens: 7,
+        output_tokens_details: { thinking_tokens: 4 },
+      }),
+    ).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 7,
+      total_tokens: 17,
+      prompt_tokens_details: { cached_tokens: 5 },
+      completion_tokens_details: { reasoning_tokens: 4 },
+    })
   })
 })

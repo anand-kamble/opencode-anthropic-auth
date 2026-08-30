@@ -153,7 +153,16 @@ The traced top-level body contained:
 
 Claude Code also emitted mid-conversation `role: "system"` messages. The server
 preserves OpenAI system messages that occur after the first non-system message,
-using the `mid-conversation-system-2026-04-07` behavior.
+using the `mid-conversation-system-2026-04-07` behavior. Anthropic constrains a
+mid-conversation system section to immediately follow a user turn (or an
+assistant turn ending in a server-tool result) and to be either final or
+immediately followed by an assistant turn. Consecutive system messages are
+treated as one system section. Because the OpenAI input translated here has no
+representation for Anthropic server-tool-result assistant turns, the server
+implements the user-turn subset and rejects unsupported ordering with a 400.
+See Anthropic's
+[mid-conversation system-message documentation](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)
+for the upstream contract.
 
 ### Thinking effort levels
 
@@ -330,6 +339,24 @@ Tool-call array indexes are assigned by tool block, rather than reusing the raw
 Anthropic content-block index. This matters when a thinking or text block comes
 before two parallel tool blocks.
 
+OpenAI usage totals include every Anthropic input-token category:
+
+```text
+prompt_tokens = input_tokens
+              + cache_creation_input_tokens
+              + cache_read_input_tokens
+total_tokens  = prompt_tokens + output_tokens
+```
+
+`prompt_tokens_details.cached_tokens` reports
+`cache_read_input_tokens`. Cache-creation tokens remain part of the prompt
+total but do not have a standard OpenAI detail field.
+
+If the downstream OpenAI client cancels its response stream, the compatibility
+stream aborts its parser and cancels the upstream Anthropic reader. This keeps
+a disconnected client from leaving a subscription request running until the
+model finishes.
+
 ## OAuth and token refresh
 
 The standalone server reuses the repository's PKCE flow:
@@ -362,7 +389,11 @@ Successful responses carry a new `access_token`, `refresh_token`, and
 `expires_in`. Refresh tokens rotate, so the server re-reads the credentials file
 before each attempt and persists both returned tokens together. Concurrent
 callers share one in-flight refresh. Network errors and retryable 5xx responses
-receive up to two retries with exponential backoff.
+receive up to two retries with exponential backoff. Each token-endpoint fetch
+has a hard 10-second deadline via `AbortSignal.timeout`; Bun's `TimeoutError` is
+treated as a retryable network error. Thus a stalled endpoint gets at most
+three timed attempts, separated by 500 ms and 1,000 ms backoffs, instead of
+leaving the shared refresh promise pending indefinitely.
 
 ## Model discovery
 
@@ -425,6 +456,10 @@ needed.
    ANTHROPIC_BASE_URL=http://127.0.0.1:8400 \
      claude -p "Reply with exactly: hello" --output-format json
    ```
+
+   The server applies the same safety boundary to its configurable
+   `ANTHROPIC_BASE_URL`: non-loopback upstreams must use HTTPS. Plaintext HTTP
+   is accepted only for `localhost`, IPv4 loopback, or `[::1]` debugging.
 
 4. For tool-call structure, use an authorized prompt that requires two
    independent tools, then inspect both the assistant `tool_use` request turn

@@ -12,12 +12,13 @@ import { collectChatCompletion, translateToOpenAISSE } from './openai/stream.ts'
 import { toAnthropicBody } from './openai/translate.ts'
 import { BadRequestError, type OpenAIError } from './openai/types.ts'
 
-const config = loadConfig()
+const loginMode = process.argv[2] === 'login'
+const config = loadConfig(process.env, { requireApiKey: !loginMode })
 
 // ---------------------------------------------------------------------------
 // `claude-subscription-server login`
 
-if (process.argv[2] === 'login') {
+if (loginMode) {
   try {
     await login(config.credentialsPath)
   } catch (error) {
@@ -33,9 +34,10 @@ if (process.argv[2] === 'login') {
 
 function serve() {
   const store = new CredentialStore(config.credentialsPath)
-
-  // Random bearer key when SERVER_API_KEY is unset; printed once at startup.
-  const apiKey = config.apiKey ?? crypto.randomUUID()
+  const apiKey = config.apiKey
+  if (!apiKey) {
+    throw new Error('SERVER_API_KEY is required when starting the server')
+  }
 
   function errorBody(
     message: string,
@@ -228,11 +230,6 @@ function serve() {
   console.log(
     `claude-subscription-server listening on http://${config.host}:${server.port}`,
   )
-  if (!config.apiKey) {
-    console.log(
-      `SERVER_API_KEY not set — generated key (shown once): ${apiKey}`,
-    )
-  }
   if (config.modelAllowlist === null) {
     console.log(
       `models: all upstream models (fallback: ${config.fallbackModels.join(', ')})`,

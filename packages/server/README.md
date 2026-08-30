@@ -43,19 +43,28 @@ stable `account_uuid`. Tokens rotate on refresh and are persisted automatically.
 ## Run
 
 ```bash
+export SERVER_API_KEY="$(openssl rand -hex 32)"
+
 claude-subscription-server
 # or
 bun run --cwd packages/server start
 ```
 
+`SERVER_API_KEY` is required when starting the HTTP server. It is never
+generated or printed by the process; keep the same value available to each
+local client that needs to authenticate. The `login` subcommand does not
+require this variable.
+
 Then point any OpenAI SDK at the server:
 
 ```python
+import os
+
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8080/v1",
-    api_key="<SERVER_API_KEY printed at startup>",
+    api_key=os.environ["SERVER_API_KEY"],
 )
 resp = client.chat.completions.create(
     model="claude-opus-5",
@@ -196,8 +205,8 @@ for the full configuration schema.
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `8080` | Port to listen on |
-| `SERVER_API_KEY` | random (printed once at startup) | Bearer key clients must send |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Upstream API base (debug proxies can log plaintext here) |
+| `SERVER_API_KEY` | required | Bearer key clients must send; server startup fails when it is missing or blank |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | HTTPS upstream API base; plaintext HTTP is accepted only for loopback debug proxies (`localhost`, `127.0.0.0/8`, or `[::1]`) |
 | `CREDENTIALS_PATH` | `~/.config/claude-subscription-server/auth.json` | Credentials file path |
 | `CLAUDE_MODELS` | unset (allow all) | Optional restriction and static `/v1/models` fallback override |
 | `CC_VERSION` | `2.1.236` | Claude Code version to impersonate |
@@ -215,6 +224,14 @@ it — anyone with the key burns your subscription quota.
   user message with `tool_result` blocks.
 - System messages after the first non-system message are sent as mid-conversation
   `role: "system"` messages (via the `mid-conversation-system-2026-04-07` beta).
+  Such a system section must immediately follow a user turn and must be final
+  or immediately followed by an assistant turn; unsupported ordering and
+  unsupported message roles return an OpenAI-style 400.
+- Anthropic cache-creation and cache-read input tokens are included in
+  `prompt_tokens` and `total_tokens`; cache reads are also reported as
+  `prompt_tokens_details.cached_tokens`.
+- Cancelling a streaming response cancels its upstream Anthropic reader, so a
+  disconnected client does not leave the subscription request running.
 - Anthropic's opaque `429 rate_limit_error` with message `Error` is reported as
   a subscription system-prompt gate diagnostic instead of being passed through
   without context.

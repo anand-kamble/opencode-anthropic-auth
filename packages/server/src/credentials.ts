@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { CLIENT_ID, TOKEN_URL } from '../../../src/constants.ts'
@@ -58,10 +58,22 @@ export async function saveCredentials(
   credentials: Credentials,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  // Write then chmod: mode on `writeFile` can be narrowed by umask, the
-  // explicit chmod guarantees 600 regardless.
-  await writeFile(path, JSON.stringify(credentials, null, 2), { mode: 0o600 })
-  await chmod(path, 0o600)
+  const temporaryPath = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`
+  try {
+    // Keep the temporary file beside the target so rename is atomic. Readers
+    // then see either the complete old credentials or the complete rotated
+    // credentials, never a file truncated by an in-place write.
+    await writeFile(temporaryPath, JSON.stringify(credentials, null, 2), {
+      flag: 'wx',
+      mode: 0o600,
+    })
+    // `mode` can be narrowed by umask; explicit chmod guarantees exactly 600.
+    await chmod(temporaryPath, 0o600)
+    await rename(temporaryPath, path)
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 export class CredentialStore {

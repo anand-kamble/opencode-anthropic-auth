@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, open, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -31,6 +31,46 @@ async function expiredCredentialPath(): Promise<string> {
   await saveCredentials(path, credentials)
   return path
 }
+
+describe('credential persistence', () => {
+  test('atomically replaces the shared file with mode 0600', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'claude-server-creds-'))
+    tempDirectories.push(directory)
+    const path = join(directory, 'auth.json')
+    const original: Credentials = {
+      access: 'original-access',
+      refresh: 'original-refresh',
+      expires: 1,
+      device_id: 'device-id',
+      account_uuid: 'account-uuid',
+    }
+    const rotated: Credentials = {
+      ...original,
+      access: 'rotated-access',
+      refresh: 'rotated-refresh',
+      expires: 2,
+    }
+
+    await saveCredentials(path, original)
+    const originalHandle = await open(path, 'r')
+    try {
+      await saveCredentials(path, rotated)
+
+      // An open handle continues to reference the complete old inode. An
+      // in-place truncate/write would instead expose the replacement bytes.
+      const oldSnapshot = JSON.parse(
+        await originalHandle.readFile('utf8'),
+      ) as Credentials
+      expect(oldSnapshot).toEqual(original)
+    } finally {
+      await originalHandle.close()
+    }
+
+    expect(await loadCredentials(path)).toEqual(rotated)
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(await readdir(directory)).toEqual(['auth.json'])
+  })
+})
 
 describe('CredentialStore refresh timeout', () => {
   test('retries TimeoutError and persists rotated credentials', async () => {

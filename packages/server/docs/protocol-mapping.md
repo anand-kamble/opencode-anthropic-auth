@@ -387,13 +387,15 @@ Accept: application/json, text/plain, */*
 
 Successful responses carry a new `access_token`, `refresh_token`, and
 `expires_in`. Refresh tokens rotate, so the server re-reads the credentials file
-before each attempt and persists both returned tokens together. Concurrent
-callers share one in-flight refresh. Network errors and retryable 5xx responses
-receive up to two retries with exponential backoff. Each token-endpoint fetch
-has a hard 10-second deadline via `AbortSignal.timeout`; Bun's `TimeoutError` is
-treated as a retryable network error. Thus a stalled endpoint gets at most
-three timed attempts, separated by 500 ms and 1,000 ms backoffs, instead of
-leaving the shared refresh promise pending indefinitely.
+before each attempt and atomically persists both returned tokens together with
+a same-directory temporary file and rename. Concurrent in-process callers share
+one in-flight refresh, while readers in other processes see either the complete
+old file or the complete rotated file. Network errors and retryable 5xx
+responses receive up to two retries with exponential backoff. Each
+token-endpoint fetch has a hard 10-second deadline via `AbortSignal.timeout`;
+Bun's `TimeoutError` is treated as a retryable network error. Thus a stalled
+endpoint gets at most three timed attempts, separated by 500 ms and 1,000 ms
+backoffs, instead of leaving the shared refresh promise pending indefinitely.
 
 ## Model discovery
 
